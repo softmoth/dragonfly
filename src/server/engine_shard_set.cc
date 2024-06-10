@@ -893,4 +893,6 @@ ShardId Shard(string_view v, ShardId shard_num) {
   return hash % shard_num;
 }
 
+thread_local std::atomic<ScheduleNode*>* ScheduleNode::tlocal_head = nullptr;
+
 }  // namespace dfly

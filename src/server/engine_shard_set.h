@@ -346,6 +346,17 @@ class EngineShardSet {
   std::vector<TaskQueue*> shard_queue_;
 };
 
+struct ScheduleNode {
+  Transaction* trans;
+  ScheduleNode* next = nullptr;
+
+  bool can_run_immediately = false;
+  std::atomic_uint32_t schedule_fails = 0;
+
+  // tlocal_head cardinality as size of shard_set->size.
+  static thread_local std::atomic<ScheduleNode*>* tlocal_head;
+};
+
 template <typename U, typename P>
 void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
   util::fb2::BlockingCounter bc{0};

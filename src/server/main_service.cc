@@ -861,6 +861,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
+    ScheduleNode::tlocal_head = new std::atomic<ScheduleNode*>[shard_num];
+    for (size_t i = 0; i < shard_num; i++) {
+      ScheduleNode::tlocal_head[i].store(nullptr);
+    }
   });
 
   shard_set->Init(shard_num, !opts.disable_time_update);
@@ -902,7 +906,11 @@ void Service::Shutdown() {
   ChannelStore::Destroy();
 
   shard_set->Shutdown();
-  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.Await([](ProactorBase* pb) {
+    ServerState::tlocal()->Destroy();
+    delete[] ScheduleNode::tlocal_head;
+    ScheduleNode::tlocal_head = nullptr;
+  });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);

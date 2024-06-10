@@ -703,25 +703,58 @@ void Transaction::ScheduleInternal() {
 
     InitTxTime();
 
-    atomic_uint32_t schedule_fails = 0;
-    auto cb = [this, &schedule_fails, can_run_immediately]() {
-      if (!ScheduleInShard(EngineShard::tlocal(), can_run_immediately)) {
-        schedule_fails.fetch_add(1, memory_order_relaxed);
+    ScheduleNode schedule_node;
+    schedule_node.can_run_immediately = can_run_immediately;
+    schedule_node.trans = this;
+
+    auto cb = [submit_ptr = ScheduleNode::tlocal_head]() {
+      EngineShard* shard = EngineShard::tlocal();
+      ShardId sid = shard->shard_id();
+
+      // We atomically fetch the whole list and flush it for submitter.
+      ScheduleNode* head = submit_ptr[sid].exchange(nullptr, memory_order_acq_rel);
+      DCHECK(head);
+      while (head != nullptr) {
+        Transaction* trans = head->trans;
+        if (!trans->ScheduleInShard(shard, head->can_run_immediately)) {
+          head->schedule_fails.fetch_add(1, memory_order_relaxed);
+        }
+        head = head->next;
+        trans->FinishHop();
       }
-      FinishHop();
     };
 
-    run_barrier_.Start(unique_shard_cnt_);
     if (CanRunInlined()) {
       // single shard schedule operation can't fail
       CHECK(ScheduleInShard(EngineShard::tlocal(), can_run_immediately));
-      run_barrier_.Dec();
     } else {
-      IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
+      run_barrier_.Start(unique_shard_cnt_);
+
+      if (unique_shard_cnt_ == 1) {
+        // tlocal_head is thread local so it's single producer (this thread) and single consumer
+        // (shard thread).
+        auto& atomic_head = ScheduleNode::tlocal_head[unique_shard_id_];
+        schedule_node.next = atomic_head.load(memory_order_relaxed);
+        if (schedule_node.next) {
+          if (!atomic_head.compare_exchange_strong(schedule_node.next, &schedule_node,
+                                                   memory_order_acq_rel)) {
+            // the only thing that can change atomic_head is when we flush the list in the callback
+            // above.
+            CHECK(schedule_node.next == nullptr);
+          }
+        }
+        if (schedule_node.next == nullptr) {
+          atomic_head.store(&schedule_node, memory_order_release);
+          shard_set->Add(unique_shard_id_, std::move(cb));
+        }
+      } else {
+        LOG(FATAL) << "Broken: TBD";
+        IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
+      }
       run_barrier_.Wait();
     }
 
-    if (schedule_fails.load(memory_order_relaxed) == 0) {
+    if (schedule_node.schedule_fails.load(memory_order_relaxed) == 0) {
       coordinator_state_ |= COORD_SCHED;
 
       RecordTxScheduleStats(this);
